@@ -1,0 +1,73 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.datasets import cifar10
+import matplotlib.pyplot as plt
+
+# Load CIFAR-10 dataset
+(x_train, _), (x_test, _) = cifar10.load_data()
+
+# Normalize images
+x_train = x_train.astype('float32') / 255.0
+x_test = x_test.astype('float32') / 255.0
+
+# Add random noise to images
+def add_noise(images, noise_factor=0.2):
+    noisy_images = images + noise_factor * np.random.randn(*images.shape)
+    noisy_images = np.clip(noisy_images, 0., 1.)
+    return noisy_images
+
+x_train_noisy = add_noise(x_train)
+x_test_noisy = add_noise(x_test)
+
+# Build the Denoising Autoencoder model
+input_img = layers.Input(shape=(32, 32, 3))
+
+# Encoder
+x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(input_img)
+x = layers.MaxPooling2D((2, 2), padding='same')(x)
+x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+encoded = layers.MaxPooling2D((2, 2), padding='same')(x)
+
+# Decoder
+x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(encoded)
+x = layers.UpSampling2D((2, 2))(x)
+x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+x = layers.UpSampling2D((2, 2))(x)
+decoded = layers.Conv2D(3, (3, 3), activation='sigmoid', padding='same')(x)
+
+autoencoder = models.Model(input_img, decoded)
+autoencoder.compile(optimizer='adam', loss='mse')
+
+# Train the autoencoder
+autoencoder.fit(x_train_noisy, x_train, epochs=20, batch_size=128, validation_data=(x_test_noisy, x_test))
+
+# Compare noisy and reconstructed images
+def display_images(original, noisy, reconstructed, num_images=10):
+    plt.figure(figsize=(15, 5))
+    for i in range(num_images):
+        # Original image
+        ax = plt.subplot(3, num_images, i + 1)
+        plt.imshow(original[i])
+        plt.title("Original")
+        plt.axis("off")
+
+        # Noisy image
+        ax = plt.subplot(3, num_images, i + 1 + num_images)
+        plt.imshow(noisy[i])
+        plt.title("Noisy")
+        plt.axis("off")
+
+        # Reconstructed image
+        ax = plt.subplot(3, num_images, i + 1 + 2 * num_images)
+        plt.imshow(reconstructed[i])
+        plt.title("Reconstructed")
+        plt.axis("off")
+
+    plt.show()
+
+# Get reconstructed images
+reconstructed_images = autoencoder.predict(x_test_noisy)
+
+# Display original, noisy, and reconstructed images
+display_images(x_test, x_test_noisy, reconstructed_images)
