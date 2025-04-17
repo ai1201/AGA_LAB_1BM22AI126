@@ -1,0 +1,52 @@
+import numpy as np
+from sklearn.datasets import fetch_openml
+from sklearn.neural_network import BernoulliRBM
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.base import clone
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import classification_report, accuracy_score
+
+# Load MNIST dataset
+print("Loading MNIST...")
+X, y = fetch_openml('mnist_784', version=1, return_X_y=True, as_frame=False)
+X = X / 255.0  # Normalize pixel values
+y = y.astype('int')
+
+# Split into train/test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Scale input to [0, 1] range (RBM works with binary/normalized inputs)
+scaler = MinMaxScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# Define the stacked RBMs
+rbm1 = BernoulliRBM(n_components=256, learning_rate=0.06, n_iter=10, verbose=True, random_state=0)
+rbm2 = BernoulliRBM(n_components=128, learning_rate=0.06, n_iter=10, verbose=True, random_state=0)
+
+# Train first RBM
+print("\nTraining RBM 1...")
+rbm1.fit(X_train)
+X_rbm1 = rbm1.transform(X_train)
+
+# Train second RBM on top of first
+print("\nTraining RBM 2...")
+rbm2.fit(X_rbm1)
+X_rbm2 = rbm2.transform(X_rbm1)
+
+# Train logistic regression classifier on top (fine-tuning)
+print("\nFine-tuning with logistic regression...")
+clf = LogisticRegression(max_iter=1000, solver='lbfgs', multi_class='multinomial')
+clf.fit(X_rbm2, y_train)
+
+# Test pipeline on test data
+X_test_rbm1 = rbm1.transform(X_test)
+X_test_rbm2 = rbm2.transform(X_test_rbm1)
+y_pred = clf.predict(X_test_rbm2)
+
+# Evaluate performance
+print("\nEvaluation:")
+print(classification_report(y_test, y_pred))
+print("Accuracy:", accuracy_score(y_test, y_pred))
