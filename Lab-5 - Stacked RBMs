@@ -1,0 +1,144 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, random_split, TensorDataset
+
+class RBM(nn.Module):
+    def __init__(self, n_visible, n_hidden):
+        super(RBM, self).__init__()
+        self.W = nn.Parameter(torch.randn(n_hidden, n_visible) * 0.1)
+        self.h_bias = nn.Parameter(torch.zeros(n_hidden))
+        self.v_bias = nn.Parameter(torch.zeros(n_visible))
+
+    def sample_h(self, v):
+        prob = torch.sigmoid(torch.matmul(v, self.W.t()) + self.h_bias)
+        return prob, torch.bernoulli(prob)
+
+    def sample_v(self, h):
+        prob = torch.sigmoid(torch.matmul(h, self.W) + self.v_bias)
+        return prob, torch.bernoulli(prob)
+
+    def contrastive_divergence(self, v0, k=1):
+        v = v0
+        for _ in range(k):
+            h_prob, h_sample = self.sample_h(v)
+            v_prob, v = self.sample_v(h_sample)
+        h0_prob, _ = self.sample_h(v0)
+        hk_prob, _ = self.sample_h(v)
+        self.W.grad = torch.matmul(h0_prob.t(), v0) - torch.matmul(hk_prob.t(), v)
+        self.v_bias.grad = torch.sum(v0 - v, dim=0)
+        self.h_bias.grad = torch.sum(h0_prob - hk_prob, dim=0)
+        return torch.mean((v0 - v) ** 2)
+
+class DBN(nn.Module):
+    def __init__(self, sizes):
+        super(DBN, self).__init__()
+        self.sizes = sizes
+        self.rbms = nn.ModuleList([RBM(sizes[i], sizes[i+1]) for i in range(len(sizes) - 1)])
+
+    def pretrain(self, data_loader, epochs=5, lr=0.01, k=1):
+        for idx, rbm in enumerate(self.rbms):
+            optimizer = optim.SGD(rbm.parameters(), lr=lr)
+            for epoch in range(epochs):
+                total_loss = 0
+                for batch, _ in data_loader:
+                    batch = batch.view(batch.size(0), -1)
+                    batch = batch.bernoulli()
+                    optimizer.zero_grad()
+                    loss = rbm.contrastive_divergence(batch, k)
+                    for param in rbm.parameters():
+                        param.grad /= batch.size(0)
+                    optimizer.step()
+                    total_loss += loss.item()
+                print(f"RBM {idx + 1} Epoch {epoch + 1}: Loss = {total_loss:.4f}")
+            all_features = []
+            all_labels = []
+            for batch, label in data_loader:
+                batch = batch.view(batch.size(0), -1)
+                prob, _ = rbm.sample_h(batch)
+                all_features.append(prob.detach())
+                all_labels.append(label)
+            features_tensor = torch.cat(all_features, dim=0)
+            labels_tensor = torch.cat(all_labels, dim=0)
+            new_dataset = TensorDataset(features_tensor, labels_tensor)
+            data_loader = DataLoader(new_dataset, batch_size=64, shuffle=True)
+
+class FineTunedDBN(nn.Module):
+    def __init__(self, dbn):
+        super(FineTunedDBN, self).__init__()
+        layers = []
+        for rbm in dbn.rbms:
+            linear = nn.Linear(rbm.W.shape[1], rbm.W.shape[0])
+            linear.weight.data = rbm.W.data
+            linear.bias.data = rbm.h_bias.data
+            layers.append(linear)
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(dbn.sizes[-1], 10))
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.model(x)
+
+class MLP(nn.Module):
+    def __init__(self, sizes):
+        super(MLP, self).__init__()
+        layers = []
+        for i in range(len(sizes) - 2):
+            layers.append(nn.Linear(sizes[i], sizes[i+1]))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(sizes[-2], sizes[-1]))
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.model(x)
+
+def train_model(model, train_loader, test_loader, epochs=10, lr=0.001):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.CrossEntropyLoss()
+    for epoch in range(epochs):
+        model.train()
+        for x_batch, y_batch in train_loader:
+            x_batch = x_batch.view(x_batch.size(0), -1).to(device)
+            y_batch = y_batch.to(device)
+            pred = model(x_batch)
+            loss = loss_fn(pred, y_batch)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        acc = test_model(model, test_loader, device)
+        print(f"Epoch {epoch + 1}: Accuracy = {acc:.2f}%")
+
+def test_model(model, test_loader, device):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for x_batch, y_batch in test_loader:
+            x_batch = x_batch.view(x_batch.size(0), -1).to(device)
+            y_batch = y_batch.to(device)
+            outputs = model(x_batch)
+            _, predicted = torch.max(outputs, 1)
+            total += y_batch.size(0)
+            correct += (predicted == y_batch).sum().item()
+    return 100 * correct / total
+
+transform = transforms.Compose([transforms.ToTensor()])
+dataset = datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
+train_data, val_data = random_split(dataset, [50000, 10000])
+train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
+test_loader = DataLoader(val_data, batch_size=64, shuffle=False)
+
+print("\nPretraining DBN on Fashion-MNIST...")
+dbn = DBN([784, 256, 128])
+dbn.pretrain(train_loader)
+
+print("\nFine-tuning DBN...")
+finetuned_model = FineTunedDBN(dbn)
+train_model(finetuned_model, train_loader, test_loader)
+
+print("\nTraining traditional MLP...")
+mlp = MLP([784, 256, 128, 10])
+train_model(mlp, train_loader, test_loader)
